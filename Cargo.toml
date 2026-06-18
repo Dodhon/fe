@@ -1,0 +1,9 @@
+[package]
+name = "fe"
+version = "0.1.0"
+edition = "2021"
+description = "Cached command-line wrapper for QMD retrieval."
+repository = "https://github.com/Dodhon/fe"
+publish = false
+
+[dependencies]

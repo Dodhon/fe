@@ -1,0 +1,21 @@
+/target
+
+# Local QMD and fe runtime state. These can contain private indexed documents,
+# cache metadata, embeddings, or local filesystem paths.
+.cache/
+.qmd/
+qmd/
+fe-cache*/
+*.sqlite
+*.sqlite3
+*.db
+*.out
+*.err
+*.code
+*.meta
+
+# Local environment and editor state.
+.env
+.env.*
+!.env.example
+.DS_Store
