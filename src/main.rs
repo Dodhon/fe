@@ -281,16 +281,19 @@ fn sqlite_fingerprint(path: &Path) -> Result<String, rusqlite::Error> {
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let (vec_count, vec_max): (i64, String) = conn.query_row(
-        "SELECT count(*), COALESCE(max(embedded_at), '') FROM content_vectors",
+    // max(rowid) is an O(1) B-tree descent, unlike count(*) or max() on an
+    // unindexed column, which walk the whole table (~4ms on 36k vector rows).
+    // Combined with the documents count/timestamp it still catches rebuilds.
+    let vec_max_rowid: i64 = conn.query_row(
+        "SELECT COALESCE(max(rowid), 0) FROM content_vectors",
         [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| row.get(0),
     )?;
     let coll_count: i64 = conn.query_row("SELECT count(*) FROM store_collections", [], |row| {
         row.get(0)
     })?;
     Ok(format!(
-        "docs={doc_count}:{doc_max}\nvecs={vec_count}:{vec_max}\ncolls={coll_count}\n"
+        "docs={doc_count}:{doc_max}\nvecs={vec_max_rowid}\ncolls={coll_count}\n"
     ))
 }
 
