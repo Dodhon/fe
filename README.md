@@ -30,7 +30,7 @@ The runtime cache defaults to the user's local cache directory under `qmd/fe-cac
 
 - Rust toolchain with Cargo.
 - `qmd` available on `PATH` for retrieval commands.
-- `sqlite3` available on `PATH` for stronger QMD index fingerprinting. If unavailable, `fe` falls back to file metadata fingerprinting.
+SQLite is bundled via `rusqlite`, so no external `sqlite3` binary is needed. If the index cannot be read, `fe` falls back to file metadata fingerprinting.
 
 ## Build
 

@@ -252,29 +252,46 @@ fn qmd_index_fingerprint(path: &Path) -> String {
     if !path.exists() {
         return "missing".to_string();
     }
-    // O(1)-ish summary instead of scanning every row: data_version changes on
-    // any external write, and counts/max-timestamps catch content changes.
-    let sql = r#"
-PRAGMA data_version;
-SELECT count(*), COALESCE(max(modified_at), '') FROM documents WHERE active = 1;
-SELECT count(*), COALESCE(max(embedded_at), '') FROM content_vectors;
-SELECT count(*) FROM store_collections;
-"#;
-    match Command::new("sqlite3").arg(path).arg(sql).output() {
-        Ok(output) if output.status.success() => {
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(
-                format!(
-                    "size={}\n",
-                    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-                )
-                .as_bytes(),
-            );
-            bytes.extend_from_slice(&output.stdout);
+    match sqlite_fingerprint(path) {
+        Ok(summary) => {
+            let mut bytes = format!(
+                "size={}\n",
+                fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+            )
+            .into_bytes();
+            bytes.extend_from_slice(summary.as_bytes());
             format!("sqlite:{}", fnv1a64_hex(&bytes))
         }
-        _ => format!("stat:{}", stat_fingerprint(path)),
+        Err(_) => format!("stat:{}", stat_fingerprint(path)),
     }
+}
+
+// O(1)-ish summary instead of scanning every row: counts and max timestamps
+// catch content changes. Deliberately excludes schema_version/data_version,
+// which qmd bumps on every run even when the indexed content is unchanged.
+fn sqlite_fingerprint(path: &Path) -> Result<String, rusqlite::Error> {
+    use rusqlite::{Connection, OpenFlags};
+
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let (doc_count, doc_max): (i64, String) = conn.query_row(
+        "SELECT count(*), COALESCE(max(modified_at), '') FROM documents WHERE active = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (vec_count, vec_max): (i64, String) = conn.query_row(
+        "SELECT count(*), COALESCE(max(embedded_at), '') FROM content_vectors",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let coll_count: i64 = conn.query_row("SELECT count(*) FROM store_collections", [], |row| {
+        row.get(0)
+    })?;
+    Ok(format!(
+        "docs={doc_count}:{doc_max}\nvecs={vec_count}:{vec_max}\ncolls={coll_count}\n"
+    ))
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {
