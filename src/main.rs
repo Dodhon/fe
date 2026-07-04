@@ -126,33 +126,20 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     Ok(code)
 }
 
+/// Wrapper flags are only recognized before the first non-flag argument, so
+/// flags and words like "help" that appear after the mode reach qmd untouched.
 fn parse_flags(args: &mut Vec<String>) -> WrapperFlags {
     let mut flags = WrapperFlags::default();
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--refresh" => {
-                flags.refresh = true;
-                args.remove(index);
-            }
-            "--no-cache" => {
-                flags.no_cache = true;
-                args.remove(index);
-            }
-            "--cache-stats" => {
-                flags.cache_stats = true;
-                args.remove(index);
-            }
-            "--clear-cache" => {
-                flags.clear_cache = true;
-                args.remove(index);
-            }
-            "-h" | "--help" | "help" => {
-                flags.help = true;
-                args.remove(index);
-            }
-            _ => index += 1,
+    while !args.is_empty() {
+        match args[0].as_str() {
+            "--refresh" => flags.refresh = true,
+            "--no-cache" => flags.no_cache = true,
+            "--cache-stats" => flags.cache_stats = true,
+            "--clear-cache" => flags.clear_cache = true,
+            "-h" | "--help" | "help" => flags.help = true,
+            _ => break,
         }
+        args.remove(0);
     }
     flags
 }
@@ -265,23 +252,13 @@ fn qmd_index_fingerprint(path: &Path) -> String {
     if !path.exists() {
         return "missing".to_string();
     }
+    // O(1)-ish summary instead of scanning every row: data_version changes on
+    // any external write, and counts/max-timestamps catch content changes.
     let sql = r#"
-SELECT COALESCE(group_concat(row, char(10)), '') FROM (
-  SELECT collection || char(9) || path || char(9) || hash || char(9) || modified_at AS row
-  FROM documents
-  WHERE active = 1
-  ORDER BY collection, path
-);
-SELECT COALESCE(group_concat(row, char(10)), '') FROM (
-  SELECT hash || char(9) || seq || char(9) || model || char(9) || embed_fingerprint || char(9) || embedded_at AS row
-  FROM content_vectors
-  ORDER BY hash, seq
-);
-SELECT COALESCE(group_concat(row, char(10)), '') FROM (
-  SELECT name || char(9) || path || char(9) || pattern || char(9) || COALESCE(context, '') AS row
-  FROM store_collections
-  ORDER BY name
-);
+PRAGMA data_version;
+SELECT count(*), COALESCE(max(modified_at), '') FROM documents WHERE active = 1;
+SELECT count(*), COALESCE(max(embedded_at), '') FROM content_vectors;
+SELECT count(*) FROM store_collections;
 "#;
     match Command::new("sqlite3").arg(path).arg(sql).output() {
         Ok(output) if output.status.success() => {
@@ -316,7 +293,17 @@ fn find_executable(name: &str) -> Option<PathBuf> {
 }
 
 fn is_executable(path: &Path) -> bool {
-    path.is_file()
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 fn fnv1a64_hex(bytes: &[u8]) -> String {
@@ -336,6 +323,11 @@ fn cache_stats() -> Result<i32, Box<dyn std::error::Error>> {
     for entry in fs::read_dir(&root)? {
         let entry = entry?;
         let path = entry.path();
+        // Remove tmp files orphaned by interrupted cache writes.
+        if path.extension().and_then(|ext| ext.to_str()) == Some("tmp") {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
         if path.extension().and_then(|ext| ext.to_str()) == Some("out") {
             entries += 1;
         }
@@ -364,7 +356,19 @@ fn clear_cache() -> Result<i32, Box<dyn std::error::Error>> {
 }
 
 fn json_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -416,20 +420,43 @@ mod tests {
     }
 
     #[test]
-    fn parse_wrapper_flags_removes_only_wrapper_flags() {
+    fn parse_wrapper_flags_only_consumes_leading_flags() {
         let mut args = strings(&[
             "--refresh",
+            "--no-cache",
             "search",
             "privacy",
             "--index",
             "memory",
-            "--no-cache",
         ]);
         let flags = parse_flags(&mut args);
 
         assert!(flags.refresh);
         assert!(flags.no_cache);
         assert_eq!(args, strings(&["search", "privacy", "--index", "memory"]));
+    }
+
+    #[test]
+    fn parse_wrapper_flags_leaves_trailing_flags_for_qmd() {
+        let mut args = strings(&["qmd", "query", "--help"]);
+        let flags = parse_flags(&mut args);
+
+        assert!(!flags.help);
+        assert_eq!(args, strings(&["qmd", "query", "--help"]));
+    }
+
+    #[test]
+    fn parse_wrapper_flags_leaves_help_as_query_text() {
+        let mut args = strings(&["search", "help"]);
+        let flags = parse_flags(&mut args);
+
+        assert!(!flags.help);
+        assert_eq!(args, strings(&["search", "help"]));
+    }
+
+    #[test]
+    fn json_escape_handles_control_characters() {
+        assert_eq!(json_escape("a\nb\x01c"), "a\\nb\\u0001c");
     }
 
     #[test]
